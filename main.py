@@ -129,12 +129,19 @@ class ApiEndpoints:
     
     class Auth:
         REGISTER = "auth/register"
+        LOGIN = "auth/login"
+        ACTIVATE = "auth/active-account"
+
+class LoginError(Exception):
+    pass
 
 class ReferralClient:
     def __init__(self, proxy_manager: Optional[ProxyManager] = None):
         self.faker = Faker()
         self.proxy_manager = proxy_manager
         self.current_proxy = None
+        self.email = None
+        self.password = None
         
     def _generate_credentials(self) -> Tuple[str, str, str]:
         email_domains = ["@gmail.com", "@outlook.com", "@yahoo.com", "@hotmail.com"]
@@ -147,6 +154,8 @@ class ReferralClient:
             ''.join(random.choices(string.ascii_lowercase, k=8)) +
             random.choice(string.ascii_uppercase)
         )
+        self.email = email
+        self.password = password
         return username, email, password
 
     def _update_proxy(self):
@@ -155,9 +164,8 @@ class ReferralClient:
             if self.current_proxy:
                 proxy_addr = self.current_proxy['http']
                 log_step(f"Using proxy: {proxy_addr}", "info")
-
-    def _get_headers(self) -> Dict[str, str]:
-        return {
+    def _get_headers(self, auth_token: Optional[str] = None) -> Dict[str, str]:
+        headers = {
             'accept': '*/*',
             'accept-language': 'en-US,en;q=0.9',
             'content-type': 'application/json',
@@ -172,10 +180,16 @@ class ReferralClient:
             'sec-fetch-site': 'cross-site',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36'
         }
+        
+        if auth_token:
+            headers['Authorization'] = f'Bearer {auth_token}'
+            headers['origin'] = 'chrome-extension://lgmpfmgeabnnlemejacfljbmonaomfmm'
+            
+        return headers 
 
-    async def _make_request(self, method: str, endpoint: str, json_data: dict) -> dict:
+    async def _make_request(self, method: str, endpoint: str, json_data: dict, auth_token: Optional[str] = None) -> dict:
         self._update_proxy()
-        headers = self._get_headers()
+        headers = self._get_headers(auth_token)
         url = ApiEndpoints.get_url(endpoint)
 
         try:
@@ -194,6 +208,60 @@ class ReferralClient:
             log_step(f"Request failed: {str(e)}", "error")
             return {"success": False, "msg": str(e)}
 
+    async def login(self, captcha_service) -> str:
+        try:
+            log_step("Getting captcha token for login...", "info")
+            captcha_token = await captcha_service.get_captcha_token_async()
+            log_step("Captcha token obtained", "success")
+
+            json_data = {
+                'user': self.email,
+                'password': self.password,
+                'remember_me': True,
+                'recaptcha_token': captcha_token
+            }
+
+            log_step("Attempting login...", "info")
+            response = await self._make_request(
+                method='POST',
+                endpoint=ApiEndpoints.Auth.LOGIN,
+                json_data=json_data
+            )
+
+            if not response.get("success"):
+                msg = response.get("msg", "Unknown login error")
+                log_step(f"Login failed: {msg}", "error")
+                raise LoginError(msg)
+
+            access_token = response['data']['token']
+            log_step("Login successful", "success")
+            return access_token
+
+        except Exception as e:
+            log_step(f"Login error: {str(e)}", "error")
+            raise
+
+    async def activate_account(self, access_token: str):
+        try:
+            log_step("Attempting account activation...", "info")
+            response = await self._make_request(
+                method='POST',
+                endpoint=ApiEndpoints.Auth.ACTIVATE,
+                json_data={},
+                auth_token=access_token
+            )
+
+            if response.get("success"):
+                log_step(f"Account activation successful: {response.get('msg', 'Success')}", "success")
+            else:
+                log_step(f"Account activation failed: {response.get('msg', 'Unknown error')}", "error")
+
+            return response
+
+        except Exception as e:
+            log_step(f"Activation error: {str(e)}", "error")
+            raise
+        
     async def process_referral(self, ref_code: str, captcha_service) -> Optional[Dict]:
         try:
             username, email, password = self._generate_credentials()
@@ -216,12 +284,19 @@ class ReferralClient:
             
             if register_response.get("success"):
                 log_step(f"Registration successful: {register_response.get('msg', 'Success')}", "success")
+                
+                access_token = await self.login(captcha_service)
+                
+                activation_response = await self.activate_account(access_token)
+                
                 return {
                     "username": username,
                     "email": email,
                     "password": password,
                     "referral_code": ref_code,
-                    "message": register_response.get('msg', 'Success')
+                    "token": access_token,
+                    "activation_status": activation_response.get('success', False),
+                    "activation_message": activation_response.get('msg', 'Unknown')
                 }
             else:
                 log_step(f"Registration failed: {register_response.get('msg', 'Unknown error')}", "error")
@@ -284,6 +359,8 @@ async def main():
             print(f"{Fore.CYAN}Username: {Fore.WHITE}{result['username']}")
             print(f"{Fore.CYAN}Email: {Fore.WHITE}{result['email']}")
             print(f"{Fore.CYAN}Password: {Fore.WHITE}{result['password']}")
+            print(f"{Fore.CYAN}Referred to: {Fore.WHITE}{result['referral_code']}")
+            print(f"{Fore.CYAN}Token: {Fore.WHITE}{result['token']}")
             successful_referrals.append(result)
             
             with open('accounts.txt', 'a') as f:
@@ -291,7 +368,7 @@ async def main():
                 f.write(f"Password: {result['password']}\n")
                 f.write(f"Username: {result['username']}\n")
                 f.write(f"Referred to: {result['referral_code']}\n")
-                f.write(f"Message: {result['message']}\n")
+                f.write(f"Token: {result['token']}\n")
                 f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("-" * 50 + "\n")
         

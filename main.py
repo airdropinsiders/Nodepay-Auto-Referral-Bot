@@ -34,7 +34,7 @@ def print_banner():
     print(f"{Fore.CYAN}{'='*45}")
     print(f"{Fore.YELLOW}       Nodepay Auto Referral Bot")
     print(f"{Fore.YELLOW}       t.me/AirdropInsiderID")
-    print(f"{Fore.YELLOW}       do with your own risk")
+    print(f"{Fore.YELLOW}       do with your own risk - better use proxy")
     print(f"{Fore.CYAN}{'='*45}\n")
 
 def log_step(message: str, type: str = "info"):
